@@ -7,8 +7,8 @@ import akshare as ak
 import re
 
 # === 页面全局设置 ===
-st.set_page_config(page_title="智能财报审计系统 (红黑榜修复版)", layout="wide", initial_sidebar_state="expanded")
-st.title("📊 智能财报审计系统 (热度透视+红黑榜)")
+st.set_page_config(page_title="智能财报审计系统 (终极连接版)", layout="wide", initial_sidebar_state="expanded")
+st.title("📊 智能财报审计系统 (终极连接版)")
 
 
 # === 核心处理引擎 (ETL) ===
@@ -103,7 +103,7 @@ if uploaded_files:
             csh = df_temp; st.sidebar.success(f"💸 现金表: {f.name}")
 
 
-# === 联网获取基础信息 (移除排名，保留基本面) ===
+# === 联网获取基础信息 ===
 @st.cache_data(ttl=3600)
 def get_stock_basic(code):
     try:
@@ -128,8 +128,7 @@ if inc is not None and bal is not None and csh is not None:
         if name:
             st.markdown(f"### 🏭 {name} ({detected_code}) 深度审计报告")
 
-            # 计算一个“理论热度值” (基于市值的简单算法，模拟热度)
-            # 千亿市值以上热度自动设为高
+            # 模拟热度值
             heat_score = min(100, max(10, int((cap / 100000000000) * 100)))
             if heat_score < 20:
                 heat_level = "❄️ 散户冷门"
@@ -138,7 +137,6 @@ if inc is not None and bal is not None and csh is not None:
             else:
                 heat_level = "🌟 全民焦点"
 
-            # 布局：基本面 + 关注度传送门
             col_info, col_heat = st.columns([2, 1])
 
             with col_info:
@@ -149,15 +147,22 @@ if inc is not None and bal is not None and csh is not None:
                 st.progress(heat_score)
 
             with col_heat:
-                st.markdown("**🔍 投资者情报中心 (一键直达)**")
-                # 东方财富行业榜
-                st.link_button("📈 东方财富-行业排行", f"https://data.eastmoney.com/bkzj/{ind}.html")
+                st.markdown("**🔍 行业情报传送门 (修复版)**")
+                c_btn1, c_btn2 = st.columns(2)
 
-                # 百度指数 & 股吧
-                c_h1, c_h2 = st.columns(2)
-                c_h1.link_button("🔍 百度搜索指数",
-                                 f"https://index.baidu.com/v2/main/index.html#/trend/{name}?words={name}")
-                c_h2.link_button("🗣️ 股吧讨论热度", f"https://guba.eastmoney.com/list,{detected_code}.html")
+                # 1. 行业资金/排行 (改用搜索链接，确保永不失效)
+                c_btn1.link_button("📈 行业资金流向", f"https://so.eastmoney.com/web/s?keyword={ind}资金流")
+
+                # 2. 业绩报表中心 (用户提供的链接)
+                # 移除具体年月，指向最新页面
+                c_btn1.link_button("📊 业绩报表中心", "https://data.eastmoney.com/bbsj/yjbb.html")
+
+                # 3. 百度指数 (v2 main 接口)
+                c_btn2.link_button("🔍 百度搜索指数",
+                                   f"https://index.baidu.com/v2/main/index.html#/trend/{name}?words={name}")
+
+                # 4. 股吧
+                c_btn2.link_button("🗣️ 股吧讨论热度", f"https://guba.eastmoney.com/list,{detected_code}.html")
 
             st.divider()
 
@@ -173,7 +178,7 @@ if inc is not None and bal is not None and csh is not None:
 
     i_sub, b_sub, c_sub = inc.loc[dates], bal.loc[dates], csh.loc[dates]
 
-    # --- 预计算关键指标 ---
+    # --- 预计算 ---
     rev, _ = get_col_smart(i_sub, ['营业总收入', '营业收入'])
     op_prof, _ = get_col_smart(i_sub, ['营业利润'])
     fair, _ = get_col_smart(i_sub, ['公允价值'])
@@ -200,38 +205,32 @@ if inc is not None and bal is not None and csh is not None:
     op_ratio = op_val[latest] / tot_asset[latest] if tot_asset[latest] > 0 else 0
     cash_ratio_val = ocf[latest] / (rev[latest] + 1)
 
-    # --- 生成亮点与风险 (纯文本列表，防止DeltaGenerator报错) ---
+    # --- 生成列表 (修复 DeltaGenerator 错误) ---
     highlights, risks = [], []
 
-    # 利润判断
     if op_prof[latest] != 0:
         cr = core_profit[latest] / op_prof[latest]
         if cr > 0.9:
             highlights.append(f"主业纯度极高：核心利润占比 {cr * 100:.0f}%")
         elif cr < 0.5:
-            risks.append(f"主业空心化：核心利润占比仅 {cr * 100:.0f}%，依赖非经常性损益")
+            risks.append(f"主业空心化：核心利润占比仅 {cr * 100:.0f}%")
 
-    # 减值判断
     if abs(total_loss[latest]) > abs(op_prof[latest] * 0.2):
         risks.append(f"减值暴雷：本期减值对利润侵蚀严重")
 
-    # 现金流判断
     if cash_ratio_val > 1:
         highlights.append(f"现金奶牛：净现比 {cash_ratio_val * 100:.0f}%，利润含金量高")
     elif cash_ratio_val < 0:
-        risks.append("持续失血：经营现金流为负，造血能力差")
+        risks.append("持续失血：经营现金流为负")
 
-    # 分红判断
     if div[latest] > 0: highlights.append("注重回报：本期有真金白银分红")
 
-    # 资产结构
     if op_ratio > 0.7:
         highlights.append(f"专注实业：{op_ratio * 100:.0f}% 资产用于经营")
     elif op_ratio < 0.5:
         risks.append(f"脱实向虚：过半资产用于金融/投资")
 
     # --- 核心图表展示区 ---
-
     st.markdown("### 1. 盈利质量 (Benefit)")
     c1, c2 = st.columns(2)
     c1.plotly_chart(px.bar(x=dates, y=rev, title="营收规模").update_traces(marker_color='#95A5A6'),
@@ -274,11 +273,10 @@ if inc is not None and bal is not None and csh is not None:
                                                                                                line_color="green"),
         use_container_width=True)
 
-    # --- 红黑榜结论 (BUG修复版) ---
+    # --- 红黑榜结论 ---
     st.markdown("---")
     st.header("📝 审计红黑榜结论")
 
-    # 计算总分
     final_score = 60 + (15 if cash_ratio_val > 1 else -10 if cash_ratio_val < 0 else 0) + \
                   (15 if core_profit[latest] / op_prof[latest] > 0.8 else -10 if core_profit[latest] / op_prof[
                       latest] < 0.5 else 0) + \
@@ -293,23 +291,17 @@ if inc is not None and bal is not None and csh is not None:
         f"<div style='text-align:center; border:4px solid {color}; padding:20px; border-radius:15px; background:rgba(0,0,0,0.02)'><h1 style='color:{color}; margin:0'>{final_score}</h1><p style='margin:0; font-weight:bold'>综合评分</p></div>",
         unsafe_allow_html=True)
 
-    # 修复 DeltaGenerator 报错的关键：
-    # 错误写法: [st.success(h) for h in highlights] -> 这会返回一个对象列表并被打印
-    # 正确写法: 使用明确的 for 循环，不返回列表
-
     with pros:
         st.markdown("#### 🌟 核心投资亮点")
         if highlights:
-            for h in highlights:
-                st.success(f"**{h}**")
+            for h in highlights: st.success(f"**{h}**")
         else:
             st.info("暂无显著亮点")
 
     with cons:
         st.markdown("#### 💣 潜在风险提示")
         if risks:
-            for r in risks:
-                st.error(f"**{r}**")
+            for r in risks: st.error(f"**{r}**")
         else:
             st.success("暂无重大雷点")
 
