@@ -7,17 +7,16 @@ import akshare as ak
 import re
 
 # === 页面全局设置 ===
-st.set_page_config(page_title="全自动财报审计系统 (智能分拣版)", layout="wide", initial_sidebar_state="expanded")
-st.title("🤖 全自动财报审计系统 (一键拖拽版)")
+st.set_page_config(page_title="智能财报审计系统 (红黑榜修复版)", layout="wide", initial_sidebar_state="expanded")
+st.title("📊 智能财报审计系统 (热度透视+红黑榜)")
 
 
-# === 核心处理引擎 ===
+# === 核心处理引擎 (ETL) ===
 
 def smart_load(file):
     """智能ETL函数：读取并清洗数据"""
     if file is None: return None
     try:
-        # 必须重置指针，因为文件可能被预读过
         file.seek(0)
         try:
             df = pd.read_excel(file, header=None, engine='openpyxl')
@@ -27,7 +26,6 @@ def smart_load(file):
 
         df = df.astype(str)
         header_idx = -1
-        # 扫描寻找表头
         for i in range(min(20, len(df))):
             row_str = "".join(df.iloc[i].tolist())
             if "营业收入" in row_str or "资产总计" in row_str or "经营活动" in row_str or "科目" in row_str:
@@ -55,20 +53,12 @@ def smart_load(file):
 
 
 def identify_table_type(df):
-    """
-    根据列名特征，自动识别表格类型
-    返回: 'inc' (利润表), 'bal' (资产表), 'csh' (现金表) 或 None
-    """
     if df is None: return None
     cols = "".join(df.columns.astype(str).tolist())
-
-    # 现金流量表特征：经营活动...现金...
     if "经营活动" in cols and "现金" in cols:
         return 'csh'
-    # 资产负债表特征：资产总计...负债...
     elif "资产总计" in cols or "负债合计" in cols:
         return 'bal'
-    # 利润表特征：营业收入...净利润 (且不包含现金流特征)
     elif "营业收入" in cols and "利润" in cols:
         return 'inc'
     return None
@@ -83,15 +73,12 @@ def get_col_smart(df, keywords_list):
 
 # === 侧边栏：智能投递口 ===
 st.sidebar.header("📁 智能投递口")
-st.sidebar.info("请一次性框选或拖入三个Excel文件，系统将自动识别哪个是哪个。")
-
-# 允许上传多个文件
+st.sidebar.info("请拖入三个Excel文件，系统自动识别并联网分析。")
 uploaded_files = st.sidebar.file_uploader(
-    "把所有文件扔这里 (利润/资产/现金)",
+    "拖入文件 (利润/资产/现金)",
     type=['xlsx', 'xls'],
     accept_multiple_files=True
 )
-
 years_lookback = st.sidebar.slider("审计周期 (最近N年)", 3, 10, 5)
 
 # === 自动分拣逻辑 ===
@@ -100,97 +87,78 @@ detected_code = None
 
 if uploaded_files:
     st.sidebar.markdown("---")
-    st.sidebar.subheader("🔍 文件识别结果")
-
     for f in uploaded_files:
-        # 1. 尝试从文件名获取股票代码
         if not detected_code:
             match = re.search(r'(\d{6})', f.name)
             if match: detected_code = match.group(1)
 
-        # 2. 读取并识别内容
         df_temp = smart_load(f)
         t_type = identify_table_type(df_temp)
 
         if t_type == 'inc':
-            inc = df_temp
-            st.sidebar.success(f"📄 利润表 (Benefit): {f.name}")
+            inc = df_temp; st.sidebar.success(f"📄 利润表: {f.name}")
         elif t_type == 'bal':
-            bal = df_temp
-            st.sidebar.success(f"🏛️ 资产表 (Debt): {f.name}")
+            bal = df_temp; st.sidebar.success(f"🏛️ 资产表: {f.name}")
         elif t_type == 'csh':
-            csh = df_temp
-            st.sidebar.success(f"💸 现金表 (Cash): {f.name}")
-        else:
-            st.sidebar.warning(f"❓ 未知类型: {f.name} (请检查格式)")
+            csh = df_temp; st.sidebar.success(f"💸 现金表: {f.name}")
 
 
-# === 行业透视逻辑 ===
+# === 联网获取基础信息 (移除排名，保留基本面) ===
 @st.cache_data(ttl=3600)
-def get_stock_profile_advanced(code):
+def get_stock_basic(code):
     try:
         df_info = ak.stock_individual_info_em(symbol=code)
         info_dict = dict(zip(df_info['item'], df_info['value']))
-        name, industry, market_cap = info_dict.get('股票简称', '未知'), info_dict.get('行业', '未知'), info_dict.get(
-            '总市值', 0)
-
-        rank_msg, leader_msg = "暂无数据", "暂无数据"
-        if industry != '未知':
-            try:
-                df_ind = ak.stock_board_industry_cons_em(symbol=industry)
-                if not df_ind.empty and '总市值' in df_ind.columns:
-                    df_ind['代码'] = df_ind['代码'].astype(str).str.strip()
-                    df_ind['总市值'] = pd.to_numeric(df_ind['总市值'], errors='coerce')
-                    df_ind = df_ind.sort_values('总市值', ascending=False).reset_index(drop=True)
-
-                    top = df_ind.iloc[0]
-                    leader_msg = f"{top['名称']} ({top['代码']}) - {top['总市值'] / 1e8:.0f}亿"
-
-                    target = df_ind[df_ind['代码'] == str(code).strip()]
-                    if not target.empty:
-                        rank_msg = f"第 {target.index[0] + 1} 名 / {len(df_ind)} 家"
-                    else:
-                        for idx, row in df_ind.iterrows():
-                            if str(code).strip() in str(row['代码']):
-                                rank_msg = f"第 {idx + 1} 名 / {len(df_ind)} 家";
-                                break
-            except:
-                pass
-
-        tags = []
-        try:
-            mcap = market_cap / 1e8
-            if mcap > 1000:
-                tags.append("🔥 千亿巨头")
-            elif mcap > 300:
-                tags.append("💎 行业龙头")
-            elif mcap > 100:
-                tags.append("🏢 知名大票")
-            else:
-                tags.append("🐟 中小盘股")
-            if "第 1 名" in rank_msg: tags.append("👑 绝对一哥")
-        except:
-            pass
-        return name, industry, market_cap, rank_msg, leader_msg, tags
+        name = info_dict.get('股票简称', '未知')
+        industry = info_dict.get('行业', '未知')
+        market_cap = info_dict.get('总市值', 0)
+        return name, industry, market_cap
     except:
-        return None, None, None, None, None, []
+        return None, None, 0
 
 
 # === 主程序逻辑 ===
-
 if inc is not None and bal is not None and csh is not None:
 
-    # --- 0. 头部：股票画像 ---
+    # --- 0. 头部：股票画像与市场热度 ---
     if detected_code:
-        with st.spinner(f"正在全网扫描 [{detected_code}] 行业地位..."):
-            name, ind, cap, rank, leader, tags = get_stock_profile_advanced(detected_code)
+        with st.spinner(f"正在连接数据中心，获取 [{detected_code}] 市场情报..."):
+            name, ind, cap = get_stock_basic(detected_code)
+
         if name:
-            st.markdown(f"### 🏭 {name} ({detected_code}) 行业地位透视")
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("所属行业", ind, f"总市值 {cap / 1e8:.1f}亿")
-            m2.metric("行业排名", rank, "按市值")
-            m3.metric("行业绝对龙头", leader.split(' ')[0], leader.split(' ')[-1] if '-' in leader else "")
-            m4.metric("企业标签", tags[0] if tags else "无", tags[1] if len(tags) > 1 else None)
+            st.markdown(f"### 🏭 {name} ({detected_code}) 深度审计报告")
+
+            # 计算一个“理论热度值” (基于市值的简单算法，模拟热度)
+            # 千亿市值以上热度自动设为高
+            heat_score = min(100, max(10, int((cap / 100000000000) * 100)))
+            if heat_score < 20:
+                heat_level = "❄️ 散户冷门"
+            elif heat_score < 60:
+                heat_level = "🔥 市场热门"
+            else:
+                heat_level = "🌟 全民焦点"
+
+            # 布局：基本面 + 关注度传送门
+            col_info, col_heat = st.columns([2, 1])
+
+            with col_info:
+                m1, m2, m3 = st.columns(3)
+                m1.metric("所属行业", ind)
+                m2.metric("总市值", f"{cap / 1e8:.1f} 亿")
+                m3.metric("市场关注级", heat_level, f"热度指数 {heat_score}")
+                st.progress(heat_score)
+
+            with col_heat:
+                st.markdown("**🔍 投资者情报中心 (一键直达)**")
+                # 东方财富行业榜
+                st.link_button("📈 东方财富-行业排行", f"https://data.eastmoney.com/bkzj/{ind}.html")
+
+                # 百度指数 & 股吧
+                c_h1, c_h2 = st.columns(2)
+                c_h1.link_button("🔍 百度搜索指数",
+                                 f"https://index.baidu.com/v2/main/index.html#/trend/{name}?words={name}")
+                c_h2.link_button("🗣️ 股吧讨论热度", f"https://guba.eastmoney.com/list,{detected_code}.html")
+
             st.divider()
 
     # --- 数据对齐 ---
@@ -205,7 +173,7 @@ if inc is not None and bal is not None and csh is not None:
 
     i_sub, b_sub, c_sub = inc.loc[dates], bal.loc[dates], csh.loc[dates]
 
-    # --- 预计算 ---
+    # --- 预计算关键指标 ---
     rev, _ = get_col_smart(i_sub, ['营业总收入', '营业收入'])
     op_prof, _ = get_col_smart(i_sub, ['营业利润'])
     fair, _ = get_col_smart(i_sub, ['公允价值'])
@@ -232,16 +200,16 @@ if inc is not None and bal is not None and csh is not None:
     op_ratio = op_val[latest] / tot_asset[latest] if tot_asset[latest] > 0 else 0
     cash_ratio_val = ocf[latest] / (rev[latest] + 1)
 
-    # --- 生成亮点与风险 ---
+    # --- 生成亮点与风险 (纯文本列表，防止DeltaGenerator报错) ---
     highlights, risks = [], []
 
     # 利润判断
     if op_prof[latest] != 0:
         cr = core_profit[latest] / op_prof[latest]
         if cr > 0.9:
-            highlights.append(f"主业极强：核心利润占比 {cr * 100:.0f}%，利润纯度高")
+            highlights.append(f"主业纯度极高：核心利润占比 {cr * 100:.0f}%")
         elif cr < 0.5:
-            risks.append(f"主业空心：核心利润占比仅 {cr * 100:.0f}%，依赖投资/补贴")
+            risks.append(f"主业空心化：核心利润占比仅 {cr * 100:.0f}%，依赖非经常性损益")
 
     # 减值判断
     if abs(total_loss[latest]) > abs(op_prof[latest] * 0.2):
@@ -249,12 +217,12 @@ if inc is not None and bal is not None and csh is not None:
 
     # 现金流判断
     if cash_ratio_val > 1:
-        highlights.append(f"现金奶牛：净现比 {cash_ratio_val * 100:.0f}%，回款极好")
+        highlights.append(f"现金奶牛：净现比 {cash_ratio_val * 100:.0f}%，利润含金量高")
     elif cash_ratio_val < 0:
-        risks.append("持续失血：经营现金流为负")
+        risks.append("持续失血：经营现金流为负，造血能力差")
 
     # 分红判断
-    if div[latest] > 0: highlights.append("注重回报：有真金白银分红")
+    if div[latest] > 0: highlights.append("注重回报：本期有真金白银分红")
 
     # 资产结构
     if op_ratio > 0.7:
@@ -262,9 +230,8 @@ if inc is not None and bal is not None and csh is not None:
     elif op_ratio < 0.5:
         risks.append(f"脱实向虚：过半资产用于金融/投资")
 
-    # --- 模块展示 ---
+    # --- 核心图表展示区 ---
 
-    # 1. 利润
     st.markdown("### 1. 盈利质量 (Benefit)")
     c1, c2 = st.columns(2)
     c1.plotly_chart(px.bar(x=dates, y=rev, title="营收规模").update_traces(marker_color='#95A5A6'),
@@ -276,7 +243,6 @@ if inc is not None and bal is not None and csh is not None:
     ]).update_layout(barmode='relative', title="利润拆解")
     c2.plotly_chart(fig2, use_container_width=True)
 
-    # 2. 资产
     st.markdown("---")
     st.markdown("### 2. 资产结构 (Debt/Assets)")
     c3, c4 = st.columns(2)
@@ -294,7 +260,6 @@ if inc is not None and bal is not None and csh is not None:
     c4.plotly_chart(px.pie(values=[op_val[latest], non_op_val[latest]], names=['经营', '非经营'], hole=0.4,
                            color_discrete_sequence=['#2980B9', '#8E44AD']), use_container_width=True)
 
-    # 3. 现金
     st.markdown("---")
     st.markdown("### 3. 现金流向 (Cash)")
     c5, c6 = st.columns(2)
@@ -309,10 +274,11 @@ if inc is not None and bal is not None and csh is not None:
                                                                                                line_color="green"),
         use_container_width=True)
 
-    # --- 红黑榜结论 ---
+    # --- 红黑榜结论 (BUG修复版) ---
     st.markdown("---")
     st.header("📝 审计红黑榜结论")
 
+    # 计算总分
     final_score = 60 + (15 if cash_ratio_val > 1 else -10 if cash_ratio_val < 0 else 0) + \
                   (15 if core_profit[latest] / op_prof[latest] > 0.8 else -10 if core_profit[latest] / op_prof[
                       latest] < 0.5 else 0) + \
@@ -327,22 +293,27 @@ if inc is not None and bal is not None and csh is not None:
         f"<div style='text-align:center; border:4px solid {color}; padding:20px; border-radius:15px; background:rgba(0,0,0,0.02)'><h1 style='color:{color}; margin:0'>{final_score}</h1><p style='margin:0; font-weight:bold'>综合评分</p></div>",
         unsafe_allow_html=True)
 
+    # 修复 DeltaGenerator 报错的关键：
+    # 错误写法: [st.success(h) for h in highlights] -> 这会返回一个对象列表并被打印
+    # 正确写法: 使用明确的 for 循环，不返回列表
+
     with pros:
         st.markdown("#### 🌟 核心投资亮点")
         if highlights:
-            [st.success(f"**{h}**") for h in highlights]
+            for h in highlights:
+                st.success(f"**{h}**")
         else:
             st.info("暂无显著亮点")
 
     with cons:
         st.markdown("#### 💣 潜在风险提示")
         if risks:
-            [st.error(f"**{r}**") for r in risks]
+            for r in risks:
+                st.error(f"**{r}**")
         else:
             st.success("暂无重大雷点")
 
 elif uploaded_files:
-    st.info("👈 文件已上传，正在解析，请稍候...")
-    st.caption("提示：请确保上传了完整的 利润表、资产负债表 和 现金流量表。")
+    st.info("👈 文件已上传，正在解析...")
 else:
     st.info("👋 欢迎！请在左侧侧边栏拖入三个财报文件，即刻开始审计。")
