@@ -7,8 +7,8 @@ import akshare as ak
 import re
 
 # === 页面全局设置 ===
-st.set_page_config(page_title="智能财报审计系统 (终极连接版)", layout="wide", initial_sidebar_state="expanded")
-st.title("📊 智能财报审计系统 (终极连接版)")
+st.set_page_config(page_title="智能财报审计系统 (概念透视版)", layout="wide", initial_sidebar_state="expanded")
+st.title("📊 智能财报审计系统 (行业+概念双透视)")
 
 
 # === 核心处理引擎 (ETL) ===
@@ -69,6 +69,16 @@ def get_col_smart(df, keywords_list):
         for k in keywords_list:
             if k in str(col): return df[col], col
     return pd.Series(0, index=df.index), "未找到"
+
+
+# === 辅助函数：生成东方财富链接代码 ===
+def get_em_suffix_code(code):
+    """根据代码判断市场后缀，用于拼接URL"""
+    code = str(code).strip()
+    if code.startswith('6'): return f"SH{code}"
+    if code.startswith('0') or code.startswith('3'): return f"SZ{code}"
+    if code.startswith('8') or code.startswith('4'): return f"BJ{code}"
+    return code
 
 
 # === 侧边栏：智能投递口 ===
@@ -141,23 +151,24 @@ if inc is not None and bal is not None and csh is not None:
 
             with col_info:
                 m1, m2, m3 = st.columns(3)
-                m1.metric("所属行业", ind)
+                m1.metric("所属行业 (官方)", ind)
                 m2.metric("总市值", f"{cap / 1e8:.1f} 亿")
                 m3.metric("市场关注级", heat_level, f"热度指数 {heat_score}")
                 st.progress(heat_score)
 
             with col_heat:
-                st.markdown("**🔍 行业情报传送门 (修复版)**")
+                st.markdown("**🔍 题材情报与资金 (一键直达)**")
                 c_btn1, c_btn2 = st.columns(2)
 
-                # 1. 行业资金/排行 (改用搜索链接，确保永不失效)
+                # 1. 核心题材 (F10) - 新增！
+                em_code = get_em_suffix_code(detected_code)
+                c_btn1.link_button("🧩 核心题材 (概念)",
+                                   f"https://emweb.securities.eastmoney.com/pc_usf10/CoreConception/index?type=web&code={em_code}")
+
+                # 2. 行业资金流向
                 c_btn1.link_button("📈 行业资金流向", f"https://so.eastmoney.com/web/s?keyword={ind}资金流")
 
-                # 2. 业绩报表中心 (用户提供的链接)
-                # 移除具体年月，指向最新页面
-                c_btn1.link_button("📊 业绩报表中心", "https://data.eastmoney.com/bbsj/yjbb.html")
-
-                # 3. 百度指数 (v2 main 接口)
+                # 3. 百度指数
                 c_btn2.link_button("🔍 百度搜索指数",
                                    f"https://index.baidu.com/v2/main/index.html#/trend/{name}?words={name}")
 
@@ -178,7 +189,7 @@ if inc is not None and bal is not None and csh is not None:
 
     i_sub, b_sub, c_sub = inc.loc[dates], bal.loc[dates], csh.loc[dates]
 
-    # --- 预计算 ---
+    # --- 预计算关键指标 ---
     rev, _ = get_col_smart(i_sub, ['营业总收入', '营业收入'])
     op_prof, _ = get_col_smart(i_sub, ['营业利润'])
     fair, _ = get_col_smart(i_sub, ['公允价值'])
@@ -205,9 +216,10 @@ if inc is not None and bal is not None and csh is not None:
     op_ratio = op_val[latest] / tot_asset[latest] if tot_asset[latest] > 0 else 0
     cash_ratio_val = ocf[latest] / (rev[latest] + 1)
 
-    # --- 生成列表 (修复 DeltaGenerator 错误) ---
+    # --- 生成列表 ---
     highlights, risks = [], []
 
+    # 利润判断
     if op_prof[latest] != 0:
         cr = core_profit[latest] / op_prof[latest]
         if cr > 0.9:
@@ -215,22 +227,27 @@ if inc is not None and bal is not None and csh is not None:
         elif cr < 0.5:
             risks.append(f"主业空心化：核心利润占比仅 {cr * 100:.0f}%")
 
+    # 减值判断
     if abs(total_loss[latest]) > abs(op_prof[latest] * 0.2):
         risks.append(f"减值暴雷：本期减值对利润侵蚀严重")
 
+    # 现金流判断
     if cash_ratio_val > 1:
         highlights.append(f"现金奶牛：净现比 {cash_ratio_val * 100:.0f}%，利润含金量高")
     elif cash_ratio_val < 0:
         risks.append("持续失血：经营现金流为负")
 
+    # 分红判断
     if div[latest] > 0: highlights.append("注重回报：本期有真金白银分红")
 
+    # 资产结构
     if op_ratio > 0.7:
         highlights.append(f"专注实业：{op_ratio * 100:.0f}% 资产用于经营")
     elif op_ratio < 0.5:
         risks.append(f"脱实向虚：过半资产用于金融/投资")
 
     # --- 核心图表展示区 ---
+
     st.markdown("### 1. 盈利质量 (Benefit)")
     c1, c2 = st.columns(2)
     c1.plotly_chart(px.bar(x=dates, y=rev, title="营收规模").update_traces(marker_color='#95A5A6'),
