@@ -7,8 +7,8 @@ import akshare as ak
 import re
 
 # === 页面全局设置 ===
-st.set_page_config(page_title="智能财报审计系统 (行业地位透视版)", layout="wide", initial_sidebar_state="expanded")
-st.title("📊 智能财报审计系统 (行业地位透视版)")
+st.set_page_config(page_title="智能财报审计系统 (修复加强版)", layout="wide", initial_sidebar_state="expanded")
+st.title("📊 智能财报审计系统 (稳定性修复版)")
 
 # === 侧边栏：数据导入 ===
 st.sidebar.header("📁 审计底稿导入")
@@ -21,8 +21,8 @@ years_lookback = st.sidebar.slider("审计周期 (最近N年)", 3, 10, 5)
 show_debug = st.sidebar.checkbox("🛠️ 开启调试模式")
 
 
-# === 🧠 核心升级：行业地位透视 ===
-@st.cache_data(ttl=3600)  # 缓存1小时，避免频繁请求
+# === 🧠 核心升级：行业地位透视 (修复排名匹配问题) ===
+@st.cache_data(ttl=3600)
 def get_stock_profile_advanced(code):
     """联网获取：基本信息 + 行业排名 + 绝对龙头"""
     try:
@@ -32,7 +32,7 @@ def get_stock_profile_advanced(code):
 
         name = info_dict.get('股票简称', '未知')
         industry = info_dict.get('行业', '未知')
-        market_cap = info_dict.get('总市值', 0)  # 单位：元
+        market_cap = info_dict.get('总市值', 0)
 
         rank_msg = "暂无数据"
         leader_msg = "暂无数据"
@@ -40,31 +40,35 @@ def get_stock_profile_advanced(code):
         # 2. 获取同行业数据并排名
         if industry != '未知':
             try:
-                # 获取该行业所有股票 (东方财富接口)
+                # 获取该行业所有股票
                 df_industry = ak.stock_board_industry_cons_em(symbol=industry)
 
-                # 确保有市值列
                 if '总市值' in df_industry.columns:
-                    # 排序：从大到小
+                    # === 关键修复：强制转换代码列为字符串，去除空格 ===
+                    df_industry['代码'] = df_industry['代码'].astype(str).str.strip()
+                    clean_code = str(code).strip()
+
+                    # 排序
                     df_industry['总市值'] = pd.to_numeric(df_industry['总市值'], errors='coerce')
                     df_industry = df_industry.sort_values('总市值', ascending=False).reset_index(drop=True)
 
-                    # A. 找龙头 (市值第一)
-                    top_stock = df_industry.iloc[0]
-                    leader_name = top_stock['名称']
-                    leader_code = top_stock['代码']
-                    leader_mcap = top_stock['总市值'] / 100000000  # 亿
-                    leader_msg = f"{leader_name} ({leader_code}) - {leader_mcap:.0f}亿"
+                    # A. 找龙头
+                    if not df_industry.empty:
+                        top_stock = df_industry.iloc[0]
+                        leader_name = top_stock['名称']
+                        leader_code = top_stock['代码']
+                        leader_mcap = top_stock['总市值'] / 100000000
+                        leader_msg = f"{leader_name} ({leader_code}) - {leader_mcap:.0f}亿"
 
-                    # B. 找当前股票排名
-                    # 确保代码格式一致 (都是字符串)
-                    target = df_industry[df_industry['代码'] == code]
+                    # B. 找排名 (使用字符串严格匹配)
+                    target = df_industry[df_industry['代码'] == clean_code]
                     if not target.empty:
-                        rank = target.index[0] + 1  # 索引从0开始，排名从1开始
+                        rank = target.index[0] + 1
                         total_count = len(df_industry)
                         rank_msg = f"第 {rank} 名 / 共 {total_count} 家"
             except Exception as e:
-                print(f"行业数据获取失败: {e}")
+                # 某些冷门行业可能接口报错，忽略
+                pass
 
         # 3. 标签逻辑
         tags = []
@@ -79,7 +83,6 @@ def get_stock_profile_advanced(code):
             else:
                 tags.append("🐟 中小盘股")
 
-            # 如果自己就是第一名
             if "第 1 名" in rank_msg:
                 tags.append("👑 绝对一哥")
         except:
@@ -91,7 +94,7 @@ def get_stock_profile_advanced(code):
         return None, None, None, None, None, []
 
 
-# === 自动识别与展示 ===
+# === 自动识别代码 ===
 detected_code = None
 uploaded_files = [f for f in [file_inc, file_bal, file_csh] if f is not None]
 
@@ -103,23 +106,20 @@ if uploaded_files:
             break
 
 if detected_code:
-    with st.spinner(f"正在全网扫描 [{detected_code}] 的行业地位..."):
+    with st.spinner(f"正在透视 [{detected_code}] 的行业地位..."):
         name, ind, cap, rank, leader, tags = get_stock_profile_advanced(detected_code)
 
     if name:
-        # 使用 Metrics 风格展示，更直观
         st.markdown(f"### 🏭 {name} ({detected_code}) 行业地位透视")
-
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("所属行业", ind, f"总市值 {cap / 100000000:.1f}亿")
         m2.metric("行业排名", rank, "按市值排序")
         m3.metric("行业绝对龙头", leader.split(' ')[0], leader.split(' ')[-1])
         m4.metric("企业标签", tags[0] if tags else "无", tags[1] if len(tags) > 1 else None)
-
         st.divider()
 
 
-# === 核心处理引擎 (保持不变) ===
+# === 核心处理引擎 ===
 
 def smart_load(file):
     if file is None: return None
@@ -212,7 +212,23 @@ if file_inc and file_bal and file_csh:
             csh = smart_load(file_csh)
 
         if inc is not None and bal is not None and csh is not None:
+            # === 关键修复：检查日期交集 ===
             common = inc.index.intersection(bal.index).intersection(csh.index)
+
+            if len(common) == 0:
+                st.error("❌ 严重错误：三个表格中没有找到**共同的日期**！")
+                st.warning("""
+                **可能原因及建议：**
+                1. **年份不匹配**：比如利润表是2024年，但资产表是2020年？
+                2. **日期格式问题**：请勾选左侧侧边栏的【🛠️ 开启调试模式】，查看读取到的原始列名和索引。
+                3. **文件错误**：请检查是否上传了空文件或错误的文件。
+                """)
+                if show_debug:
+                    st.write("利润表日期:", inc.index.tolist())
+                    st.write("资产表日期:", bal.index.tolist())
+                    st.write("现金表日期:", csh.index.tolist())
+                st.stop()  # 停止运行，防止后续崩溃
+
             dates = [d for d in common if d.month == 12][:years_lookback]
             if not dates: dates = common[:years_lookback]
 
@@ -221,6 +237,7 @@ if file_inc and file_bal and file_csh:
             c_sub = csh.loc[dates]
             latest = dates[0]
 
+            # 预计算
             rev, _ = get_col_smart(i_sub, ['营业总收入', '营业收入'])
             op_prof, _ = get_col_smart(i_sub, ['营业利润'])
             fair, _ = get_col_smart(i_sub, ['公允价值'])
@@ -292,7 +309,6 @@ if file_inc and file_bal and file_csh:
             k1.metric("经营性资产投入", f"{op_val[latest] / 100000000:.2f} 亿")
             k2.metric("周转率 (营收/资产)", f"{op_turnover:.2f} 倍")
             k3.metric("回报率 (利润/资产)", f"{op_return * 100:.1f}%")
-
             if op_ratio > 0.7:
                 st.success(f"✅ **专注主业**：{op_ratio * 100:.0f}% 的资金都在干正事。")
             elif op_ratio < 0.5:
@@ -363,6 +379,5 @@ if file_inc and file_bal and file_csh:
                 e2.warning("财务状况尚可，但存在一些瑕疵，建议保持关注。")
             else:
                 e2.error("财务风险较高，请谨慎决策！")
-
 else:
     st.info("👈 请在左侧上传三个Excel报表开始体检")
