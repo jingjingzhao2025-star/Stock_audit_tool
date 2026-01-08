@@ -4,11 +4,12 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 import akshare as ak
+import requests
 import re
 
 # === 页面全局设置 ===
-st.set_page_config(page_title="智能财报审计系统 (完全体)", layout="wide", initial_sidebar_state="expanded")
-st.title("📊 智能财报审计系统 (龙头透视+效率分析)")
+st.set_page_config(page_title="智能财报审计系统 (终极完全体)", layout="wide", initial_sidebar_state="expanded")
+st.title("📊 智能财报审计系统 (行业地位+题材热度+深度内功)")
 
 
 # === 核心处理引擎 (ETL) ===
@@ -71,19 +72,26 @@ def get_col_smart(df, keywords_list):
     return pd.Series(0, index=df.index), "未找到"
 
 
-# === 辅助：获取带后缀的代码 (用于链接) ===
+# === 联网数据引擎 (超级缝合版) ===
+
 def get_suffix_code(code):
+    """处理代码后缀，适配不同接口"""
     c = str(code).strip()
-    if c.startswith('6'): return f"sh{c}"
-    if c.startswith('0') or c.startswith('3'): return f"sz{c}"
-    if c.startswith('8') or c.startswith('4'): return f"bj{c}"
+    if c.startswith('6'): return f"SH{c}"
+    if c.startswith('0') or c.startswith('3'): return f"SZ{c}"
+    if c.startswith('8') or c.startswith('4'): return f"BJ{c}"
     return c
 
 
-# === 联网获取核心信息 (含排名) ===
-@st.cache_data(ttl=3600)
-def get_stock_profile_full(code):
-    """获取：基础信息 + 行业排名 + 龙头"""
+@st.cache_data(ttl=600)
+def get_stock_comprehensive_info(code):
+    """
+    一次性获取：
+    1. 基础信息 (行业、市值)
+    2. 实时行情 (换手率、价格 -> 用于热度仪表盘)
+    3. 行业地位 (排名、龙头 -> 用于主业护城河)
+    4. 核心题材 (F10数据 -> 用于直接展示)
+    """
     try:
         # 1. 基础信息
         df_info = ak.stock_individual_info_em(symbol=code)
@@ -92,53 +100,71 @@ def get_stock_profile_full(code):
         industry = info_dict.get('行业', '未知')
         market_cap = info_dict.get('总市值', 0)
 
+        # 2. 实时行情 (换手率)
+        turnover = 0.0
+        price = 0.0
+        try:
+            df_quote = ak.stock_zh_a_spot_em()
+            target = df_quote[df_quote['代码'] == code]
+            if not target.empty:
+                turnover = float(target.iloc[0]['换手率'])
+                price = float(target.iloc[0]['最新价'])
+        except:
+            pass
+
+        # 3. 行业排名与龙头
         rank_msg = "暂无数据"
         leader_msg = "暂无数据"
-        tags = []
+        rank_int = 9999
+        total_int = 1
 
-        # 2. 行业排名逻辑 (回归！)
         if industry != '未知':
             try:
-                # 尝试获取行业成分股
                 df_ind = ak.stock_board_industry_cons_em(symbol=industry)
                 if not df_ind.empty and '总市值' in df_ind.columns:
-                    # 清洗数据
                     df_ind['代码'] = df_ind['代码'].astype(str).str.strip()
                     df_ind['总市值'] = pd.to_numeric(df_ind['总市值'], errors='coerce')
                     df_ind = df_ind.sort_values('总市值', ascending=False).reset_index(drop=True)
 
-                    # 找龙头
                     top = df_ind.iloc[0]
                     leader_msg = f"{top['名称']} ({top['代码']}) - {top['总市值'] / 1e8:.0f}亿"
 
-                    # 找自己
-                    target = df_ind[df_ind['代码'] == str(code).strip()]
-                    if not target.empty:
-                        rank = target.index[0] + 1
-                        total = len(df_ind)
-                        rank_msg = f"第 {rank} 名 / 共 {total} 家"
-
-                        # 打标签
-                        if rank == 1:
-                            tags.append("👑 行业一哥")
-                        elif rank <= 3:
-                            tags.append("💎 行业前三")
-                        elif rank <= total * 0.1:
-                            tags.append("🔥 头部企业")
-
+                    target_ind = df_ind[df_ind['代码'] == str(code).strip()]
+                    total_int = len(df_ind)
+                    if not target_ind.empty:
+                        rank_int = target_ind.index[0] + 1
+                        rank_msg = f"第 {rank_int} 名 / 共 {total_int} 家"
             except:
                 pass
 
-        # 市值标签
-        mcap_b = market_cap / 1e8
-        if mcap_b > 1000:
-            tags.append("🐋 千亿巨头")
-        elif mcap_b < 50:
-            tags.append("🐟 小盘股")
+        # 4. 核心题材 (抓取东财F10 API)
+        core_concepts = []
+        try:
+            suffix_code = get_suffix_code(code)
+            # 这是一个公开的F10接口 URL
+            url = f"https://datacenter.eastmoney.com/securities/api/data/v1/get?reportName=RPT_F10_CORE_THEME&columns=CORE_THEME&filter=(SECUCODE=%22{suffix_code.replace('SH', '.SH').replace('SZ', '.SZ')}%22)"
+            res = requests.get(url, timeout=3).json()
+            if res['result'] and res['result']['data']:
+                # 解析一段长文本
+                theme_text = res['result']['data'][0]['CORE_THEME']
+                # 通常格式是 "1、概念A；2、概念B..." 或者直接一段话
+                # 我们简单提取几个关键词
+                parts = re.split(r'[；;、\s]', theme_text)
+                # 过滤掉空字符串和数字索引
+                clean_concepts = [p for p in parts if len(p) > 1 and not p.isdigit()][:3]
+                core_concepts = clean_concepts
+        except:
+            pass
 
-        return name, industry, market_cap, rank_msg, leader_msg, tags
-    except:
-        return None, None, 0, "未知", "未知", []
+        return {
+            "name": name, "industry": industry, "mcap": market_cap,
+            "turnover": turnover, "price": price,
+            "rank_msg": rank_msg, "leader_msg": leader_msg,
+            "rank_int": rank_int, "total_int": total_int,
+            "concepts": core_concepts
+        }
+    except Exception as e:
+        return None
 
 
 # === 侧边栏 ===
@@ -167,34 +193,75 @@ if uploaded_files:
 # === 主程序 ===
 if inc is not None and bal is not None and csh is not None:
 
-    # --- 1. 头部：全景看板 (龙头+概念+行情) ---
+    # --- 1. 头部：终极看板 (行业地位 + 题材热度 + 核心概念) ---
     if detected_code:
-        with st.spinner(f"正在全网比对 [{detected_code}] 行业地位..."):
-            name, ind, cap, rank, leader, tags = get_stock_profile_full(detected_code)
+        with st.spinner(f"正在全网扫描 [{detected_code}] 核心情报..."):
+            info = get_stock_comprehensive_info(detected_code)
 
-        if name:
-            st.markdown(f"### 🏭 {name} ({detected_code}) 深度审计报告")
+        if info:
+            name = info['name']
+            st.markdown(f"### 🏭 {name} ({detected_code}) 深度透视看板")
 
-            # 第一行：基本面与地位
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("所属行业", ind, f"市值 {cap / 1e8:.0f}亿")
-            m2.metric("行业排名", rank, "按市值")
-            m3.metric("行业龙头", leader.split(' ')[0], leader.split(' ')[-1] if '-' in leader else "")
-            m4.metric("身份标签", tags[0] if tags else "无", tags[1] if len(tags) > 1 else None)
+            # === A. 双仪表盘逻辑 ===
+            # 1. 主业护城河 (Industry Score)
+            # 逻辑：市值越大 + 排名越靠前 = 分数越高
+            mcap_score = min(60, int((info['mcap'] / 100000000000) * 60))  # 千亿市值拿60分
+            rank_score = 0
+            if info['rank_int'] == 1:
+                rank_score = 40
+            elif info['rank_int'] <= 5:
+                rank_score = 30
+            elif info['rank_int'] <= 20:
+                rank_score = 20
+            else:
+                rank_score = 10
+            industry_moat = min(100, mcap_score + rank_score)
 
-            # 第二行：传送门 (新增实时行情直达)
-            st.markdown("**🔗 核心情报直达**")
-            l1, l2, l3, l4 = st.columns(4)
+            # 2. 题材关注度 (Concept Heat)
+            # 逻辑：基于换手率。>15%极热，>7%热，>3%温，<1%冷
+            turnover = info['turnover']
+            concept_heat = min(100, int((turnover / 15.0) * 100))
 
-            full_code = get_suffix_code(detected_code)  # sh603993
-            em_code = full_code.upper()  # SH603993 (用于F10)
+            # === B. 布局展示 ===
+            # 第一排：三个专栏
+            col_ind, col_con, col_tags = st.columns([1.5, 1.5, 1.2])
 
-            # 按钮组
-            l1.link_button("📈 实时行情 (东财)", f"https://quote.eastmoney.com/{full_code}.html")
-            l2.link_button("🧩 核心题材 (F10)",
-                           f"https://emweb.securities.eastmoney.com/pc_usf10/CoreConception/index?type=web&code={em_code}")
-            l3.link_button("💰 行业资金流向", f"https://so.eastmoney.com/web/s?keyword={ind}资金流")
-            l4.link_button("🗣️ 股吧热度", f"https://guba.eastmoney.com/list,{detected_code}.html")
+            with col_ind:
+                st.markdown(f"**🔵 主业护城河 (行业地位)**")
+                st.progress(industry_moat)
+                c1, c2 = st.columns(2)
+                c1.metric("所属行业", info['industry'])
+                c2.metric("行业排名", info['rank_int'], f"共{info['total_int']}家")
+                st.caption(f"行业龙头: {info['leader_msg']}")
+
+            with col_con:
+                st.markdown(f"**🔴 题材关注度 (资金热度)**")
+                st.progress(concept_heat)
+                c3, c4 = st.columns(2)
+                c3.metric("实时换手", f"{turnover}%")
+                heat_label = "🔥 极热" if turnover > 10 else "📈 活跃" if turnover > 5 else "❄️ 冷门"
+                c4.metric("热度评级", heat_label)
+                st.caption(f"当前股价: {info['price']} 元")
+
+            with col_tags:
+                st.markdown("**🧩 核心概念 (Direct)**")
+                if info['concepts']:
+                    # 直接显示标签，不再只是链接
+                    for tag in info['concepts']:
+                        st.markdown(f"#### `🏷️ {tag}`")
+                else:
+                    st.info("暂未提取到核心题材")
+
+            # 第二排：传送门按钮
+            st.markdown("---")
+            b1, b2, b3, b4 = st.columns(4)
+            full_code = get_suffix_code(detected_code)
+
+            b1.link_button("📈 实时行情直达", f"https://quote.eastmoney.com/{full_code.lower()}.html")
+            b2.link_button("🧩 更多题材 (F10)",
+                           f"https://emweb.securities.eastmoney.com/pc_usf10/CoreConception/index?type=web&code={full_code.upper()}")
+            b3.link_button("💰 行业资金流向", f"https://so.eastmoney.com/web/s?keyword={info['industry']}资金流")
+            b4.link_button("🗣️ 股吧讨论热度", f"https://guba.eastmoney.com/list,{detected_code}.html")
 
             st.divider()
 
@@ -243,11 +310,10 @@ if inc is not None and bal is not None and csh is not None:
     ]).update_layout(barmode='relative', title="利润拆解")
     c2.plotly_chart(fig2, use_container_width=True)
 
-    # 2. 资产 (新增：效率分析图)
+    # 2. 资产 (保留效率图)
     st.markdown("---")
     st.markdown("### 2. 资产结构与资金效率 (Debt/Assets)")
 
-    # 左：结构图
     c3, c4 = st.columns(2)
     fig3 = go.Figure()
     fig3.add_trace(go.Scatter(x=dates, y=op_val, stackgroup='one', name='经营资产(投入)', line_color='#2980B9'))
@@ -255,10 +321,7 @@ if inc is not None and bal is not None and csh is not None:
     fig3.update_layout(title="资产属性演变")
     c3.plotly_chart(fig3, use_container_width=True)
 
-    # 右：效率分析 (新增可视化的投入产出对比)
-    # 计算投入产出比
-    roi_series = (core_profit / op_val) * 100
-
+    # 效率分析图 (双轴)
     fig_efficiency = go.Figure()
     fig_efficiency.add_trace(go.Bar(name='经营资产投入', x=dates, y=op_val, marker_color='#2980B9', yaxis='y'))
     fig_efficiency.add_trace(
@@ -271,19 +334,17 @@ if inc is not None and bal is not None and csh is not None:
     )
     c4.plotly_chart(fig_efficiency, use_container_width=True)
 
-    # 资金运用评价 (New!)
+    # 资金运用智能点评
     op_return = core_profit[latest] / op_val[latest] if op_val[latest] > 0 else 0
-
     msg_capital = ""
     if op_ratio > 0.7 and op_return > 0.1:
-        msg_capital = "🌟 **资金运用极度合理**：公司将绝大部分资金聚焦于主业，且产生了丰厚的回报 (ROOA > 10%)。"
+        msg_capital = f"🌟 **资金运用极度合理**：公司将 {op_ratio * 100:.0f}% 的资金聚焦于主业，且每一分钱投入都创造了丰厚的回报 (回报率 {op_return * 100:.1f}%)。"
     elif op_ratio > 0.7 and op_return < 0.05:
         msg_capital = "⚠️ **资金效率低下**：虽然资金都投在主业上，但产出微薄，可能处于价格战或产能过剩状态。"
     elif op_ratio < 0.5:
         msg_capital = "💣 **脱实向虚**：大量资金被挪用于理财或投资，主业资产占比过低，需警惕空心化风险。"
     else:
         msg_capital = "⚖️ **资金运用中规中矩**：资产配置均衡，效率处于正常区间。"
-
     st.info(msg_capital)
 
     # 3. 现金
@@ -314,14 +375,20 @@ if inc is not None and bal is not None and csh is not None:
     sc.markdown(f"<h1 style='color:{color};text-align:center'>{score}分</h1>", unsafe_allow_html=True)
 
     highlights = []
-    if rank != "暂无数据" and "第 1 名" in rank: highlights.append("👑 行业绝对龙头，地位稳固")
+    # 行业地位亮点
+    if info['rank_int'] == 1:
+        highlights.append(f"👑 行业绝对龙头 (排名第1)")
+    elif info['rank_int'] <= 5:
+        highlights.append(f"💎 行业头部企业 (排名第{info['rank_int']})")
+
+    # 财务亮点
     if op_return > 0.15: highlights.append(f"💰 赚钱机器：经营资产回报率高达 {op_return * 100:.1f}%")
     if cash_ratio > 1: highlights.append("💵 现金奶牛：回款能力极强")
 
     if highlights:
         for h in highlights: st.success(h)
     else:
-        st.warning("暂无显著亮点，建议结合概念热度操作。")
+        st.warning("暂无显著财务亮点，建议关注题材热度。")
 
 elif uploaded_files:
     st.info("👈 文件解析中...")
